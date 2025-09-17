@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands
 import asyncio
@@ -15,7 +16,8 @@ def home():
     return "✅ Bot is running!"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))  # Render provides PORT
+    app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
     t = Thread(target=run_flask)
@@ -32,18 +34,17 @@ LOG_CHANNEL_NAME = "security-logs"
 
 whitelist = set([OWNER_ID])  # trusted users
 recently_punished = {}       # cooldown memory
+log_channels = {}            # stores guild_id -> channel_id
 
 # -------------------------
 # Helper Functions
 # -------------------------
 async def get_log_channel(guild):
-    # If custom log channel set, use it
     if guild.id in log_channels:
         channel = guild.get_channel(log_channels[guild.id])
         if channel:
             return channel
     
-    # fallback to "security-logs"
     channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
     if not channel:
         try:
@@ -59,7 +60,6 @@ async def send_log(guild, message):
 
 async def punish_and_revert(guild, executor, reason: str):
     now = datetime.utcnow().timestamp()
-    # Cooldown: 15s per user
     if executor.id in recently_punished and now - recently_punished[executor.id] < 15:
         return
     recently_punished[executor.id] = now
@@ -129,25 +129,17 @@ async def on_guild_role_update(before, after):
             await punish_and_revert(guild, executor, f"Unauthorized role update ({before.name})")
 
 # -------------------------
-# Configurable Log Channel
-# -------------------------
-log_channels = {}  # stores guild_id -> channel_id
-
-# -------------------------
 # Commands
 # -------------------------
 @bot.command()
 async def setlog(ctx, channel: discord.TextChannel):
-    """Set a custom log channel for this server"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ You are not allowed to use this command.")
-
     log_channels[ctx.guild.id] = channel.id
     await ctx.send(f"✅ Log channel set to {channel.mention}")
 
 @bot.command()
 async def showlog(ctx):
-    """Show current log channel"""
     channel = await get_log_channel(ctx.guild)
     if channel:
         await ctx.send(f"📑 Current log channel is {channel.mention}")
@@ -173,10 +165,15 @@ async def whitelist_show(ctx):
     ids = ", ".join([str(uid) for uid in whitelist])
     await ctx.send(f"👥 Whitelisted IDs: {ids}")
 
+@bot.command()
+async def ping(ctx):
+    await ctx.send("🏓 Pong!")
+
 # -------------------------
 # Run the Bot
 # -------------------------
-keep_alive()  # Start the Flask server for UptimeRobot
-import os
-bot.run(os.getenv("TOKEN"))
-
+keep_alive()
+TOKEN = os.environ.get("TOKEN")  # stored safely in Render
+if not TOKEN:
+    raise ValueError("⚠️ TOKEN not found in environment variables!")
+bot.run(TOKEN)
