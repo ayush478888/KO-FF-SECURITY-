@@ -177,4 +177,6 @@ async def whitelist_show(ctx):
 # Run the Bot
 # -------------------------
 keep_alive()  # Start the Flask server for UptimeRobot
-bot.run("YOUR_DISCORD_BOT_TOKEN")
+import os
+bot.run(os.getenv("TOKEN"))
+
