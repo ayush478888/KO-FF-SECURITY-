@@ -7,21 +7,18 @@ from flask import Flask
 from threading import Thread
 
 # -------------------------
-# Flask Keep-Alive
+# Flask Keep-Alive (Render Web Service)
 # -------------------------
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot is running!"
+    return "✅ Bot is running on Render!"
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))  # Render provides PORT
-    app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
+    # Render requires using the provided PORT
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
 
 # -------------------------
 # Discord Bot Setup
@@ -170,10 +167,14 @@ async def ping(ctx):
     await ctx.send("🏓 Pong!")
 
 # -------------------------
-# Run the Bot
+# Run Flask + Bot
 # -------------------------
-keep_alive()
-TOKEN = os.environ.get("TOKEN")  # stored safely in Render
-if not TOKEN:
-    raise ValueError("⚠️ TOKEN not found in environment variables!")
-bot.run(TOKEN)
+if __name__ == "__main__":
+    # Start Flask in a thread (so Render health checks succeed)
+    Thread(target=run_flask).start()
+
+    TOKEN = os.environ.get("TOKEN")
+    if not TOKEN:
+        raise ValueError("⚠️ TOKEN not found in environment variables!")
+    
+    bot.run(TOKEN)
