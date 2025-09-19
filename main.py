@@ -1,20 +1,21 @@
 import os
+import json
+import re
 import discord
 from discord.ext import commands
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
-import json
 
 # -------------------------
-# Flask Keep-Alive (Render / Replit Web Service)
+# Flask Keep-Alive (Render Web Service)
 # -------------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot is running!"
+    return "✅ Bot is running on Render!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -28,28 +29,23 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 OWNER_ID = 1389992203589521591  # replace with your Discord ID
 LOG_CHANNEL_NAME = "security-logs"
+SAFE_ROLE_ID = 123456789012345678  # replace with role ID allowed to send links
 
-recently_punished = {}       # cooldown memory
-log_channels = {}            # stores guild_id -> channel_id
 WHITELIST_FILE = "whitelist.json"
 
-# -------------------------
-# Whitelist Persistence
-# -------------------------
 def load_whitelist():
-    try:
-        with open(WHITELIST_FILE, "r") as f:
-            return set(json.load(f))
-    except FileNotFoundError:
-        return set([OWNER_ID])  # default only owner whitelisted
-    except json.JSONDecodeError:
-        return set([OWNER_ID])
+    with open(WHITELIST_FILE, "r") as f:
+        data = json.load(f)
+        return set(data)  # expects a list of IDs in whitelist.json
 
-def save_whitelist():
+def save_whitelist(whitelist):
     with open(WHITELIST_FILE, "w") as f:
-        json.dump(list(whitelist), f)
+        json.dump(list(whitelist), f, indent=4)
 
+# Load at startup
 whitelist = load_whitelist()
+recently_punished = {}
+log_channels = {}
 
 # -------------------------
 # Helper Functions
@@ -86,7 +82,7 @@ async def punish_and_revert(guild, executor, reason: str):
     await send_log(guild, f"🚨 **Auto-ban** → {executor.mention} (`{executor.id}`) — {reason}")
 
 def is_whitelisted(user: discord.Member):
-    return user.id == OWNER_ID or user.id in whitelist
+    return user.id in whitelist or user.guild_permissions.administrator
 
 # -------------------------
 # Bot Events
@@ -99,7 +95,7 @@ async def on_ready():
 async def on_member_ban(guild, user):
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized ban attempt on {user}")
 
 @bot.event
@@ -107,7 +103,7 @@ async def on_member_remove(member):
     guild = member.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized kick attempt on {member}")
 
 @bot.event
@@ -115,7 +111,7 @@ async def on_guild_channel_create(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, "Unauthorized channel creation")
             await channel.delete()
 
@@ -124,7 +120,7 @@ async def on_guild_channel_delete(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, "Unauthorized channel deletion")
 
 @bot.event
@@ -132,7 +128,7 @@ async def on_guild_role_delete(role):
     guild = role.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized role deletion ({role.name})")
 
 @bot.event
@@ -140,8 +136,33 @@ async def on_guild_role_update(before, after):
     guild = before.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_update):
         executor = entry.user
-        if not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized role update ({before.name})")
+
+# -------------------------
+# Anti-Link Protection
+# -------------------------
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # Regex to detect links
+    url_pattern = r"(https?://\S+)"
+    if re.search(url_pattern, message.content):
+        if SAFE_ROLE_ID not in [role.id for role in message.author.roles]:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                duration = timedelta(minutes=10)
+                await message.author.timeout(duration, reason="Sent a link without permission")
+                await send_log(message.guild, f"⏳ {message.author.mention} was timed out for 10m (sent link).")
+            except Exception as e:
+                print(f"Failed to timeout: {e}")
+
+    await bot.process_commands(message)
 
 # -------------------------
 # Commands
@@ -160,22 +181,6 @@ async def showlog(ctx):
         await ctx.send(f"📑 Current log channel is {channel.mention}")
     else:
         await ctx.send("⚠️ No log channel found.")
-
-@bot.command()
-async def whitelist_add(ctx, member: discord.Member):
-    if ctx.author.id != OWNER_ID:
-        return await ctx.send("❌ You are not allowed to use this command.")
-    whitelist.add(member.id)
-    save_whitelist()
-    await ctx.send(f"✅ {member.mention} has been whitelisted.")
-
-@bot.command()
-async def whitelist_remove(ctx, member: discord.Member):
-    if ctx.author.id != OWNER_ID:
-        return await ctx.send("❌ You are not allowed to use this command.")
-    whitelist.discard(member.id)
-    save_whitelist()
-    await ctx.send(f"✅ {member.mention} has been removed from whitelist.")
 
 @bot.command()
 async def whitelist_show(ctx):
