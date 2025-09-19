@@ -5,18 +5,18 @@ import asyncio
 from datetime import datetime
 from flask import Flask
 from threading import Thread
+import json
 
 # -------------------------
-# Flask Keep-Alive (Render Web Service)
+# Flask Keep-Alive (Render / Replit Web Service)
 # -------------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot is running on Render!"
+    return "✅ Bot is running!"
 
 def run_flask():
-    # Render requires using the provided PORT
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True)
 
@@ -29,9 +29,27 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 OWNER_ID = 1389992203589521591  # replace with your Discord ID
 LOG_CHANNEL_NAME = "security-logs"
 
-whitelist = set([OWNER_ID])  # trusted users
 recently_punished = {}       # cooldown memory
 log_channels = {}            # stores guild_id -> channel_id
+WHITELIST_FILE = "whitelist.json"
+
+# -------------------------
+# Whitelist Persistence
+# -------------------------
+def load_whitelist():
+    try:
+        with open(WHITELIST_FILE, "r") as f:
+            return set(json.load(f))
+    except FileNotFoundError:
+        return set([OWNER_ID])  # default only owner whitelisted
+    except json.JSONDecodeError:
+        return set([OWNER_ID])
+
+def save_whitelist():
+    with open(WHITELIST_FILE, "w") as f:
+        json.dump(list(whitelist), f)
+
+whitelist = load_whitelist()
 
 # -------------------------
 # Helper Functions
@@ -68,7 +86,7 @@ async def punish_and_revert(guild, executor, reason: str):
     await send_log(guild, f"🚨 **Auto-ban** → {executor.mention} (`{executor.id}`) — {reason}")
 
 def is_whitelisted(user: discord.Member):
-    return user.id in whitelist or user.guild_permissions.administrator
+    return user.id == OWNER_ID or user.id in whitelist
 
 # -------------------------
 # Bot Events
@@ -81,7 +99,7 @@ async def on_ready():
 async def on_member_ban(guild, user):
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized ban attempt on {user}")
 
 @bot.event
@@ -89,7 +107,7 @@ async def on_member_remove(member):
     guild = member.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized kick attempt on {member}")
 
 @bot.event
@@ -97,7 +115,7 @@ async def on_guild_channel_create(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, "Unauthorized channel creation")
             await channel.delete()
 
@@ -106,7 +124,7 @@ async def on_guild_channel_delete(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, "Unauthorized channel deletion")
 
 @bot.event
@@ -114,7 +132,7 @@ async def on_guild_role_delete(role):
     guild = role.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized role deletion ({role.name})")
 
 @bot.event
@@ -122,7 +140,7 @@ async def on_guild_role_update(before, after):
     guild = before.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_update):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if not is_whitelisted(executor):
             await punish_and_revert(guild, executor, f"Unauthorized role update ({before.name})")
 
 # -------------------------
@@ -148,6 +166,7 @@ async def whitelist_add(ctx, member: discord.Member):
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ You are not allowed to use this command.")
     whitelist.add(member.id)
+    save_whitelist()
     await ctx.send(f"✅ {member.mention} has been whitelisted.")
 
 @bot.command()
@@ -155,6 +174,7 @@ async def whitelist_remove(ctx, member: discord.Member):
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ You are not allowed to use this command.")
     whitelist.discard(member.id)
+    save_whitelist()
     await ctx.send(f"✅ {member.mention} has been removed from whitelist.")
 
 @bot.command()
@@ -170,7 +190,6 @@ async def ping(ctx):
 # Run Flask + Bot
 # -------------------------
 if __name__ == "__main__":
-    # Start Flask in a thread (so Render health checks succeed)
     Thread(target=run_flask).start()
 
     TOKEN = os.environ.get("TOKEN")
