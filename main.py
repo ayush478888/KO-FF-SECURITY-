@@ -3,8 +3,7 @@ import json
 import re
 import discord
 from discord.ext import commands
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from flask import Flask
 from threading import Thread
 
@@ -29,20 +28,31 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 OWNER_ID = 1389992203589521591  # replace with your Discord ID
 LOG_CHANNEL_NAME = "security-logs"
-SAFE_ROLE_ID = 123456789012345678  # replace with role ID allowed to send links
 
+# Role allowed to send links
+SAFE_ROLE_ID = 1317405000863060050  # replace with your moderator/admin role ID
+
+# User IDs allowed to send links even without the role
+SAFE_LINK_IDS = {
+    1409483924383465603,
+    1417563976249774120,
+    1417570656718950564
+}
+
+# -------------------------
+# Whitelist System
+# -------------------------
 WHITELIST_FILE = "whitelist.json"
 
 def load_whitelist():
     with open(WHITELIST_FILE, "r") as f:
         data = json.load(f)
-        return set(data)  # expects a list of IDs in whitelist.json
+        return set(data)  # expects a list of IDs
 
 def save_whitelist(whitelist):
     with open(WHITELIST_FILE, "w") as f:
         json.dump(list(whitelist), f, indent=4)
 
-# Load at startup
 whitelist = load_whitelist()
 recently_punished = {}
 log_channels = {}
@@ -70,19 +80,25 @@ async def send_log(guild, message):
         await channel.send(message)
 
 async def punish_and_revert(guild, executor, reason: str):
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     if executor.id in recently_punished and now - recently_punished[executor.id] < 15:
         return
     recently_punished[executor.id] = now
 
     try:
-        await guild.ban(executor, reason=reason, delete_message_days=0)
+        await guild.ban(executor, reason=reason, delete_message_seconds=0)
     except Exception:
         pass
     await send_log(guild, f"🚨 **Auto-ban** → {executor.mention} (`{executor.id}`) — {reason}")
 
-def is_whitelisted(user: discord.Member):
-    return user.id in whitelist or user.guild_permissions.administrator
+def is_whitelisted(user, guild=None):
+    if user.id in whitelist:
+        return True
+    if guild:
+        member = guild.get_member(user.id)
+        if member and member.guild_permissions.administrator:
+            return True
+    return False
 
 # -------------------------
 # Bot Events
@@ -95,7 +111,7 @@ async def on_ready():
 async def on_member_ban(guild, user):
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, f"Unauthorized ban attempt on {user}")
 
 @bot.event
@@ -103,7 +119,7 @@ async def on_member_remove(member):
     guild = member.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, f"Unauthorized kick attempt on {member}")
 
 @bot.event
@@ -111,7 +127,7 @@ async def on_guild_channel_create(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, "Unauthorized channel creation")
             await channel.delete()
 
@@ -120,7 +136,7 @@ async def on_guild_channel_delete(channel):
     guild = channel.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, "Unauthorized channel deletion")
 
 @bot.event
@@ -128,7 +144,7 @@ async def on_guild_role_delete(role):
     guild = role.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, f"Unauthorized role deletion ({role.name})")
 
 @bot.event
@@ -136,7 +152,7 @@ async def on_guild_role_update(before, after):
     guild = before.guild
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_update):
         executor = entry.user
-        if executor.id != OWNER_ID and not is_whitelisted(executor):
+        if executor.id != OWNER_ID and not is_whitelisted(executor, guild):
             await punish_and_revert(guild, executor, f"Unauthorized role update ({before.name})")
 
 # -------------------------
@@ -147,10 +163,11 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Regex to detect links
     url_pattern = r"(https?://\S+)"
     if re.search(url_pattern, message.content):
-        if SAFE_ROLE_ID not in [role.id for role in message.author.roles]:
+        # Check if user is exempt
+        if (SAFE_ROLE_ID not in [role.id for role in message.author.roles] 
+            and message.author.id not in SAFE_LINK_IDS):
             try:
                 await message.delete()
             except Exception:
