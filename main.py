@@ -36,7 +36,8 @@ SAFE_ROLE_ID = 1317405000863060050  # replace with your moderator/admin role ID
 SAFE_LINK_IDS = {
     1409483924383465603,
     1417563976249774120,
-    1417570656718950564
+    1417570656718950564,
+    1389918229580746762
 }
 
 # -------------------------
@@ -219,3 +220,4 @@ if __name__ == "__main__":
         raise ValueError("⚠️ TOKEN not found in environment variables!")
     
     bot.run(TOKEN)
+
